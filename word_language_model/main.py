@@ -10,6 +10,9 @@ import torch.onnx
 import data
 import model
 
+# importing mathy stuff so that we can calculate perplexity (exponential of cross entropy loss)
+import math
+
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
                     help='location of the data corpus')
@@ -45,6 +48,8 @@ parser.add_argument('--save', type=str, default='model.pt',
                     help='path to save the final model')
 parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
+parser.add_argument('--enabletraining', type=bool,default='True', help='essentially so that we know whether we should train the NN or nah')
+parser.add_argument('--evalmode', type=str, default='perplexity', help='type of evaluation - normal evaluation or perplexity evaluation')
 args = parser.parse_args()
 
 # Set the random seed manually for reproducibility.
@@ -59,7 +64,7 @@ device = torch.device("cuda" if args.cuda else "cpu")
 # Load data
 ###############################################################################
 
-corpus = data.Corpus(args.data)
+corpus = data.Corpus(args.data) # this boy is to load all the texts into four different things
 
 # Starting from sequential data, batchify arranges the dataset into columns.
 # For instance, with the alphabet as the sequence and batch size 4, we'd get
@@ -86,6 +91,9 @@ eval_batch_size = 10
 train_data = batchify(corpus.train, args.batch_size)
 val_data = batchify(corpus.valid, eval_batch_size)
 test_data = batchify(corpus.test, eval_batch_size)
+
+# adding the data that we are testing the perplexity level with
+perplexity_data = batchify(corpus.perplexity, eval_batch_size)
 
 ###############################################################################
 # Build the model
@@ -141,6 +149,25 @@ def evaluate(data_source):
     return total_loss / (len(data_source) - 1)
 
 
+def evaluate_perplexity(data_source):
+    # Turn on evaluation mode which disables dropout.
+    model.eval()
+    total_loss = 0.
+    ntokens = len(corpus.dictionary)
+    hidden = model.init_hidden(eval_batch_size)
+    count = 0
+    with torch.no_grad():
+        for i in range(0, data_source.size(0) - 1, args.bptt):
+            data, targets = get_batch(data_source, i)
+            output, hidden = model(data, hidden)
+            output_flat = output.view(-1, ntokens)
+            total_loss += len(data) * criterion(output_flat, targets).item() # plus the new loss entropy loss
+            hidden = repackage_hidden(hidden)
+    mean = total_loss / (len(data_source) - 1) # this is the mean of cross entropy loss
+    # so the perplexity is going to be the exponential of the mean - yay thanks Vanya!
+    return Math.exp(mean)
+
+
 def train():
     # Turn on training mode which enables dropout.
     model.train()
@@ -189,28 +216,29 @@ def export_onnx(path, batch_size, seq_len):
 lr = args.lr
 best_val_loss = None
 
-# At any point you can hit Ctrl + C to break out of training early.
-try:
-    for epoch in range(1, args.epochs+1):
-        epoch_start_time = time.time()
-        train()
-        val_loss = evaluate(val_data)
-        print('-' * 89)
-        print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
-                'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
-                                           val_loss, math.exp(val_loss)))
-        print('-' * 89)
-        # Save the model if the validation loss is the best we've seen so far.
-        if not best_val_loss or val_loss < best_val_loss:
-            with open(args.save, 'wb') as f:
-                torch.save(model, f)
-            best_val_loss = val_loss
-        else:
-            # Anneal the learning rate if no improvement has been seen in the validation dataset.
-            lr /= 4.0
-except KeyboardInterrupt:
-    print('-' * 89)
-    print('Exiting from training early')
+if args.enabletraining:
+    # At any point you can hit Ctrl + C to break out of training early.
+    try:
+        for epoch in range(1, args.epochs+1):
+            epoch_start_time = time.time()
+            train()
+            val_loss = evaluate(val_data)
+            print('-' * 89) # interesting choice of number lul
+            print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
+                    'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
+                                            val_loss, math.exp(val_loss)))
+            print('-' * 89)
+            # Save the model if the validation loss is the best we've seen so far.
+            if not best_val_loss or val_loss < best_val_loss:
+                with open(args.save, 'wb') as f:
+                    torch.save(model, f)
+                best_val_loss = val_loss
+            else:
+                # Anneal the learning rate if no improvement has been seen in the validation dataset.
+                lr /= 4.0
+    except KeyboardInterrupt:
+        print('-' * 89) # interesting choice of number lul
+        print('Exiting from training early')
 
 # Load the best saved model.
 with open(args.save, 'rb') as f:
@@ -219,12 +247,22 @@ with open(args.save, 'rb') as f:
     # this makes them a continuous chunk, and will speed up forward pass
     model.rnn.flatten_parameters()
 
-# Run on test data.
-test_loss = evaluate(test_data)
-print('=' * 89)
-print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
-    test_loss, math.exp(test_loss)))
-print('=' * 89)
+# This was altered so that we can calculate perplexity score
+
+# if normal testing:
+if args.evalmode == 'perplexity':
+    # Run on perplexity data
+    perplexity_score = evaluate_perplexity(perplexity_data)
+    print('=' * 89)
+    print('| End of training | Perplexity score on input: {:5.2f}'.format(perplexity_score))
+    print('=' * 89)
+else:
+    # Run on test data.
+    test_loss = evaluate(test_data)
+    print('=' * 89)
+    print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
+        test_loss, math.exp(test_loss)))
+    print('=' * 89)
 
 if len(args.onnx_export) > 0:
     # Export the model in ONNX format.

@@ -11,7 +11,8 @@ import data
 import model
 
 # importing mathy stuff so that we can calculate perplexity (exponential of cross entropy loss)
-import math
+import numpy as np
+import json
 
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
@@ -48,7 +49,7 @@ parser.add_argument('--save', type=str, default='model.pt',
                     help='path to save the final model')
 parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
-parser.add_argument('--enabletraining', type=bool,default='True', help='essentially so that we know whether we should train the NN or nah')
+parser.add_argument('--enabletraining', type=bool,default=False, help='essentially so that we know whether we should train the NN or nah')
 parser.add_argument('--evalmode', type=str, default='perplexity', help='type of evaluation - normal evaluation or perplexity evaluation')
 args = parser.parse_args()
 
@@ -92,8 +93,11 @@ train_data = batchify(corpus.train, args.batch_size)
 val_data = batchify(corpus.valid, eval_batch_size)
 test_data = batchify(corpus.test, eval_batch_size)
 
+perplexity_batch_size = 5
+perplexity_data = []
 # adding the data that we are testing the perplexity level with
-perplexity_data = batchify(corpus.perplexity, eval_batch_size)
+for ids in corpus.perplexity:
+    perplexity_data.append(batchify(ids, perplexity_batch_size))
 
 ###############################################################################
 # Build the model
@@ -155,7 +159,6 @@ def evaluate_perplexity(data_source):
     total_loss = 0.
     ntokens = len(corpus.dictionary)
     hidden = model.init_hidden(eval_batch_size)
-    count = 0
     with torch.no_grad():
         for i in range(0, data_source.size(0) - 1, args.bptt):
             data, targets = get_batch(data_source, i)
@@ -165,7 +168,7 @@ def evaluate_perplexity(data_source):
             hidden = repackage_hidden(hidden)
     mean = total_loss / (len(data_source) - 1) # this is the mean of cross entropy loss
     # so the perplexity is going to be the exponential of the mean - yay thanks Vanya!
-    return Math.exp(mean)
+    return np.exp(mean)
 
 
 def train():
@@ -247,15 +250,28 @@ with open(args.save, 'rb') as f:
     # this makes them a continuous chunk, and will speed up forward pass
     model.rnn.flatten_parameters()
 
-# This was altered so that we can calculate perplexity score
-
+### This was altered so that we can calculate perplexity score ###
+# Create a dictionary to match id of document to the perplexity score
+id_to_score = {}
 # if normal testing:
 if args.evalmode == 'perplexity':
-    # Run on perplexity data
-    perplexity_score = evaluate_perplexity(perplexity_data)
-    print('=' * 89)
-    print('| End of training | Perplexity score on input: {:5.2f}'.format(perplexity_score))
-    print('=' * 89)
+    # for each thing in the perplexity data, you would run the analysis
+    for id, data in enumerate(perplexity_data):
+        # Run on perplexity data
+        perplexity_score = evaluate_perplexity(data)
+        id_to_score[id] = perplexity_score
+        print('=' * 89)
+        print('| End of training | Perplexity score on input: {:5.2f}'.format(perplexity_score))
+        print('=' * 89)
+    # And then at the end, join the two together so that we know which tweet associates to which score
+    sorted_id_to_score = sorted(id_to_score.items(), key=lambda kv: kv[1]) # this will give an ordereddict
+    with open("results.json", "w+") as result_file, open("idtoscore.json", "w+") as score_file:
+        tweet_to_score = {}
+        for id, score in sorted_id_to_score:
+            tweet_to_score[corpus.id_to_text[id]] = score
+        # at the end, write it to the json file
+        json.dump(tweet_to_score, result_file)
+        json.dump(id_to_score, score_file)
 else:
     # Run on test data.
     test_loss = evaluate(test_data)
